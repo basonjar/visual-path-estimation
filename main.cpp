@@ -1,6 +1,5 @@
 #include <cstdlib>
 #include <filesystem>
-#include <format>
 #include <gtsam/geometry/Point2.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/nonlinear/DoglegOptimizer.h>
