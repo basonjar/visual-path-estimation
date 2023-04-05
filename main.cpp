@@ -45,8 +45,8 @@ int main() {
         std::vector<cv::KeyPoint> features;
 
         cv::Ptr<cv::ORB> orb = cv::ORB::create();
-
         orb->detectAndCompute(mat, cv::noArray(), features, descriptors);
+
         images.emplace_back(Image{mat, features, descriptors});
 
         //    cv::drawKeypoints(mat, features, mat, cv::Scalar(0, 255, 0),
@@ -66,7 +66,8 @@ int main() {
             auto const& descriptor = image.descriptors.row(static_cast<int>(i));
 
             bool matchesExisting = std::ranges::any_of(uniqueDescriptors, [&](cv::Mat const& existingDescriptor) {
-                return cv::norm(existingDescriptor, descriptor) < 0.5;
+                double norm = cv::norm(existingDescriptor, descriptor);
+                return norm < 500.0;
             });
             if (matchesExisting) continue;
 
@@ -76,25 +77,38 @@ int main() {
 
     gtsam::NonlinearFactorGraph graph;
 
-    for (Image const& image: images) {
+    graph.addPrior(gtsam::Symbol('x', 0), gtsam::Pose3(), gtsam::noiseModel::Isotropic::Sigma(6, 0.1));
+
+    for (size_t j = 0; j < images.size(); ++j) {
+        Image const& image = images[j];
         for (size_t i = 0; i < image.features.size(); ++i) {
             auto const& descriptor = image.descriptors.row(static_cast<int>(i));
 
             auto it = std::ranges::find_if(uniqueDescriptors, [&](cv::Mat const& existingDescriptor) {
-                return cv::norm(existingDescriptor, descriptor) < 0.5;
+                return cv::norm(existingDescriptor, descriptor) < 500.0;
             });
             if (it == uniqueDescriptors.end()) continue;
 
             graph.emplace_shared<gtsam::GenericProjectionFactor<gtsam::Pose3, gtsam::Point3, gtsam::Cal3_S2>>(
                     gtsam::Point2(image.features[i].pt.x, image.features[i].pt.y),
                     gtsam::noiseModel::Isotropic::Sigma(2, 1.0),
-                    gtsam::Symbol('x', 0),
+                    gtsam::Symbol('x', j),
                     gtsam::Symbol('l', std::distance(uniqueDescriptors.begin(), it)),
                     K);
         }
     }
 
-    gtsam::Values result = gtsam::DoglegOptimizer(graph, gtsam::Values()).optimize();
+    graph.addPrior(gtsam::Symbol('l', 0), gtsam::Point3(), gtsam::noiseModel::Isotropic::Sigma(3, 0.1));
+
+    gtsam::Values initial;
+    for (size_t i = 0; i < images.size(); ++i) {
+        initial.insert(gtsam::Symbol('x', i), gtsam::Pose3());
+    }
+    for (size_t i = 0; i < uniqueDescriptors.size(); ++i) {
+        initial.insert(gtsam::Symbol('l', i), gtsam::Point3());
+    }
+
+    gtsam::Values result = gtsam::DoglegOptimizer(graph, initial).optimize();
     result.print("result: ");
 
     // TODO: Average descriptor values
