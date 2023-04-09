@@ -97,29 +97,20 @@ int main() {
     }
 
     for (size_t img1 = 0; img1 < images.size(); ++img1) {
-        for (size_t f1 = 0; f1 < FEATURES_PER_IMAGE; ++f1) {
+        for (size_t img2 = 0; img2 < images.size(); ++img2) {
+            if (img1 == img2) continue;
 
-            for (size_t img2 = 0; img2 < images.size(); ++img2) {
-                if (img1 == img2) continue;
+            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING, true);
+            std::vector<cv::DMatch> matches;
+            matcher->match(images[img1].descriptors, images[img2].descriptors, matches);
+            assert(matches.size() == 2);
 
-                using p_t = std::pair<double, size_t>;
-                std::priority_queue<p_t, std::vector<p_t>, std::greater<>> distances;
+            cv::DMatch const& bestMatch = matches[0];
+            cv::DMatch const& secondBestMatch = matches[1];
+            double const ratio = bestMatch.distance / secondBestMatch.distance;
 
-                for (size_t f2 = 0; f2 < FEATURES_PER_IMAGE; ++f2) {
-                    distances.emplace(cv::norm(images[img1].descriptors.row(f1), images[img2].descriptors.row(f2)), f2);
-                }
-
-                auto [d1, f2] = distances.top();
-                distances.pop();
-                auto [d2, _] = distances.top();
-                distances.pop();
-
-                double ratio = d1 / d2;
-
-                if (ratio < 0.8) {
-                    std::printf("Found match between image %zu feature %zu and image %zu feature %zu\n", img1, f1, img2, f2);
-                    unionComponents(featureGraph, FeatureComponent{img1, f1}, FeatureComponent{img2, f2});
-                }
+            if (ratio < 0.99) {
+                unionComponents(featureGraph, FeatureComponent(img1, bestMatch.queryIdx), FeatureComponent(img2, bestMatch.trainIdx));
             }
         }
     }
