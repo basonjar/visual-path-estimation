@@ -12,9 +12,11 @@
 #include <opencv2/core/types.hpp>
 #include <opencv2/features2d.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 #include <queue>
 #include <ranges>
 #include <vector>
+//#include <format>
 
 auto K = std::make_shared<gtsam::Cal3_S2>(960, 540, 0, 1344, 1344);
 
@@ -22,7 +24,7 @@ namespace fs = std::filesystem;
 
 struct Image {
     cv::Mat mat;
-    std::vector<cv::KeyPoint> features;
+    std::vector<cv::KeyPoint> keypoints;
     cv::Mat descriptors;
 };
 
@@ -37,7 +39,7 @@ constexpr size_t FEATURES_PER_IMAGE = 500;
 using FeatureGraph = std::vector<std::array<FeatureComponent, FEATURES_PER_IMAGE>>;
 
 [[nodiscard]] FeatureComponent findParent(FeatureGraph const& graph, FeatureComponent const& component) {
-    FeatureComponent const& parent = graph[component.parentImage][component.parentFeature];
+    FeatureComponent const& parent = graph.at(component.parentImage).at(component.parentFeature);
     return parent == component ? parent : findParent(graph, parent);
 }
 
@@ -47,7 +49,7 @@ void unionComponents(FeatureGraph& graph, FeatureComponent const& a, FeatureComp
 
     if (parentA == parentB) return;
 
-    graph[parentA.parentImage][parentA.parentFeature] = parentB;
+    graph.at(parentA.parentImage).at(parentA.parentFeature) = parentB;
 }
 
 auto loadImages(fs::path const& imageDirectoryPath) {
@@ -63,9 +65,9 @@ auto loadImages(fs::path const& imageDirectoryPath) {
         cv::Mat descriptors;
         std::vector<cv::KeyPoint> features;
 
-        cv::Ptr<cv::ORB> orb = cv::ORB::create();
+        cv::Ptr<cv::BRISK> descriptorExtractor = cv::BRISK::create();
 
-        orb->detectAndCompute(mat, cv::noArray(), features, descriptors);
+        descriptorExtractor->detectAndCompute(mat, cv::noArray(), features, descriptors);
 
         images.emplace_back(Image{mat, features, descriptors});
     }
@@ -100,18 +102,34 @@ int main() {
         for (size_t img2 = 0; img2 < images.size(); ++img2) {
             if (img1 == img2) continue;
 
-            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING, true);
-            std::vector<cv::DMatch> matches;
-            matcher->match(images[img1].descriptors, images[img2].descriptors, matches);
-            assert(matches.size() == 2);
+            // TODO: try out cross check, alt. to rati otest
+            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
+            using BestMatches = std::vector<cv::DMatch>;
+            std::vector<BestMatches> matches;
+            matcher->knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 2);
 
-            cv::DMatch const& bestMatch = matches[0];
-            cv::DMatch const& secondBestMatch = matches[1];
-            double const ratio = bestMatch.distance / secondBestMatch.distance;
+            BestMatches goodMatches;
+            for (BestMatches const& bestMatch: matches) {
+                assert(bestMatch.size() == 2);
 
-            if (ratio < 0.99) {
-                unionComponents(featureGraph, FeatureComponent(img1, bestMatch.queryIdx), FeatureComponent(img2, bestMatch.trainIdx));
+                auto const& [firstBest, secondBest] = std::tuple{bestMatch[0], bestMatch[1]};
+                double ratio = firstBest.distance / secondBest.distance;
+
+                //                std::printf("Ratio: %f\n", ratio);
+
+                if (ratio < 0.2) {
+                    //                    unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
+                    goodMatches.push_back(firstBest);
+                }
             }
+
+            cv::Mat m;
+            cv::drawMatches(images[img1].mat, images[img1].keypoints,
+                            images[img2].mat, images[img2].keypoints,
+                            goodMatches, m);
+            cv::resize(m, m, {}, 0.45, 0.45);
+            cv::imshow("Matches", m);
+            cv::waitKey(0);
         }
     }
 
