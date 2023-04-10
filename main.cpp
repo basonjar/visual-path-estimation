@@ -16,7 +16,6 @@
 #include <queue>
 #include <ranges>
 #include <vector>
-//#include <format>
 
 auto K = std::make_shared<gtsam::Cal3_S2>(960, 540, 0, 1344, 1344);
 
@@ -29,27 +28,28 @@ struct Image {
 };
 
 struct FeatureComponent {
-    size_t parentImage, parentFeature;
+    size_t rootImage, rootFeature;
+    bool isReferenced;
 
     auto operator<=>(FeatureComponent const&) const = default;
 };
 
-constexpr size_t FEATURES_PER_IMAGE = 500;
+using FeatureGraph = std::vector<std::vector<FeatureComponent>>;
 
-using FeatureGraph = std::vector<std::array<FeatureComponent, FEATURES_PER_IMAGE>>;
-
-[[nodiscard]] FeatureComponent findParent(FeatureGraph const& graph, FeatureComponent const& component) {
-    FeatureComponent const& parent = graph.at(component.parentImage).at(component.parentFeature);
-    return parent == component ? parent : findParent(graph, parent);
+[[nodiscard]] FeatureComponent& findRoot(FeatureGraph& graph, FeatureComponent const& component) {
+    FeatureComponent& root = graph[component.rootImage][component.rootFeature];
+    return root == component ? root : findRoot(graph, root);
 }
 
 void unionComponents(FeatureGraph& graph, FeatureComponent const& a, FeatureComponent const& b) {
-    FeatureComponent const& parentA = findParent(graph, a);
-    FeatureComponent const& parentB = findParent(graph, b);
+  FeatureComponent& rootA = findRoot(graph, a);
+  FeatureComponent& rootB = findRoot(graph, b);
 
-    if (parentA == parentB) return;
+    if (rootA == rootB) return;
 
-    graph.at(parentA.parentImage).at(parentA.parentFeature) = parentB;
+    rootA.isReferenced = rootB.isReferenced = true;
+
+    graph[rootA.rootImage][rootA.rootFeature] = rootB;
 }
 
 auto loadImages(fs::path const& imageDirectoryPath) {
@@ -80,21 +80,13 @@ int main() {
     // Load images and calculate features
     std::vector<Image> images = loadImages(imageDirectoryPath);
 
-    // TODO: optimize by vectorizing the distance matrix calculation
-    //    // Compute L2 distance between N (500 x 32) matrices
-    //    std::vector<std::array<std::array<double, 32>, FEATURES_PER_IMAGE>> distances((images.size() * images.size() - 1) / 2);
-    //    for (int i = 0; i < images.size(); ++i) {
-    //        for (int j = i + 1; j < images.size(); ++j) {
-    //        }
-    //    }
-
     // Create graph of connections between features across multiple images
     FeatureGraph featureGraph;
-    featureGraph.resize(images.size());// N x 500 matrix to be used for connected components
-
+    featureGraph.resize(images.size());
     for (size_t i = 0; i < images.size(); ++i) {
-        for (size_t f = 0; f < FEATURES_PER_IMAGE; ++f) {
-            featureGraph[i][f] = FeatureComponent{i, f};
+        featureGraph[i].resize(images[i].keypoints.size());
+        for (size_t f = 0; f < images[i].keypoints.size(); ++f) {
+            featureGraph[i][f] = FeatureComponent{i, f, false};
         }
     }
 
@@ -115,28 +107,29 @@ int main() {
                 auto const& [firstBest, secondBest] = std::tuple{bestMatch[0], bestMatch[1]};
                 double ratio = firstBest.distance / secondBest.distance;
 
-                //                std::printf("Ratio: %f\n", ratio);
-
                 if (ratio < 0.2) {
-                    //                    unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
+                    std::printf("Match: %d -> %d\n", firstBest.queryIdx, firstBest.trainIdx);
+                    unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
                     goodMatches.push_back(firstBest);
                 }
             }
 
-            cv::Mat m;
-            cv::drawMatches(images[img1].mat, images[img1].keypoints,
-                            images[img2].mat, images[img2].keypoints,
-                            goodMatches, m);
-            cv::resize(m, m, {}, 0.45, 0.45);
-            cv::imshow("Matches", m);
-            cv::waitKey(0);
+            //            cv::Mat m;
+            //            cv::drawMatches(images[img1].mat, images[img1].keypoints,
+            //                            images[img2].mat, images[img2].keypoints,
+            //                            goodMatches, m);
+            //            cv::resize(m, m, {}, 0.45, 0.45);
+            //            cv::imshow("Matches", m);
+            //            cv::waitKey(0);
         }
     }
 
     std::set<FeatureComponent> uniqueComponents;
-    for (size_t img = 0; img < images.size(); ++img) {
-        for (size_t f = 0; f < FEATURES_PER_IMAGE; ++f) {
-            uniqueComponents.insert(findParent(featureGraph, FeatureComponent{img, f}));
+    for (size_t i = 0; i < featureGraph.size(); ++i) {
+        for (size_t f = 0; f < featureGraph[i].size(); ++f) {
+            if (!featureGraph[i][f].isReferenced) continue;
+
+            uniqueComponents.insert(findRoot(featureGraph, FeatureComponent{i, f}));
         }
     }
     std::cout << "Unique components: " << uniqueComponents.size() << std::endl;

@@ -10,6 +10,7 @@ find_package(PCL REQUIRED)
 add_subdirectory(gtsam)
 
 add_executable(program main.cpp)
-#target_compile_features(program PRIVATE -stdlib=libc++)
+target_compile_options(program PRIVATE -fexperimental-library)
+target_link_options(program PRIVATE -fuse-ld=lld)
 target_link_libraries(program gtsam ${OpenCV_LIBS})
 target_include_directories(program PRIVATE ${OpenCV_INCLUDE_DIRS})
