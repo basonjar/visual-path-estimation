@@ -27,29 +27,47 @@ struct Image {
     cv::Mat descriptors;
 };
 
+using img_idx_t = size_t;
+using feature_idx_t = size_t;
+using unique_feature_idx_t = size_t;
+
 struct FeatureComponent {
-    size_t rootImage, rootFeature;
-    bool isReferenced;
+    img_idx_t imageIndex;
+    feature_idx_t featureIndex;
 
     auto operator<=>(FeatureComponent const&) const = default;
 };
 
-using FeatureGraph = std::vector<std::vector<FeatureComponent>>;
+struct ImageWithUniqueFeature {
+    FeatureComponent component;
+    cv::KeyPoint keypoint;
+};
+
+struct FeatureComponentHash {
+    [[nodiscard]] size_t operator()(FeatureComponent const& component) const {
+        return std::hash<img_idx_t>{}(component.imageIndex) ^ std::hash<feature_idx_t>{}(component.featureIndex);
+    }
+};
+
+using FeatureGraph = std::unordered_map<FeatureComponent, FeatureComponent, FeatureComponentHash>;
 
 [[nodiscard]] FeatureComponent& findRoot(FeatureGraph& graph, FeatureComponent const& component) {
-    FeatureComponent& root = graph[component.rootImage][component.rootFeature];
-    return root == component ? root : findRoot(graph, root);
+    auto it = graph.find(component);
+    if (it == graph.end()) {
+        auto it = graph.emplace(component, component);
+        return it.first->second;
+    }
+    auto& [_, parent] = *it;
+    return parent == component ? parent : findRoot(graph, parent);
 }
 
 void unionComponents(FeatureGraph& graph, FeatureComponent const& a, FeatureComponent const& b) {
-  FeatureComponent& rootA = findRoot(graph, a);
-  FeatureComponent& rootB = findRoot(graph, b);
+    FeatureComponent& rootA = findRoot(graph, a);
+    FeatureComponent& rootB = findRoot(graph, b);
 
     if (rootA == rootB) return;
 
-    rootA.isReferenced = rootB.isReferenced = true;
-
-    graph[rootA.rootImage][rootA.rootFeature] = rootB;
+    graph[rootA] = rootB;
 }
 
 auto loadImages(fs::path const& imageDirectoryPath) {
@@ -57,7 +75,7 @@ auto loadImages(fs::path const& imageDirectoryPath) {
     std::vector<Image> images;
     size_t i = 0;
     for (fs::directory_entry const& imagePath: fs::directory_iterator(imageDirectoryPath)) {
-        if (++i == 4) break;
+        if (i++ == 3) break;
 
         std::cout << "\tLoading " << imagePath.path() << std::endl;
 
@@ -82,13 +100,6 @@ int main() {
 
     // Create graph of connections between features across multiple images
     FeatureGraph featureGraph;
-    featureGraph.resize(images.size());
-    for (size_t i = 0; i < images.size(); ++i) {
-        featureGraph[i].resize(images[i].keypoints.size());
-        for (size_t f = 0; f < images[i].keypoints.size(); ++f) {
-            featureGraph[i][f] = FeatureComponent{i, f, false};
-        }
-    }
 
     for (size_t img1 = 0; img1 < images.size(); ++img1) {
         for (size_t img2 = 0; img2 < images.size(); ++img2) {
@@ -107,8 +118,8 @@ int main() {
                 auto const& [firstBest, secondBest] = std::tuple{bestMatch[0], bestMatch[1]};
                 double ratio = firstBest.distance / secondBest.distance;
 
-                if (ratio < 0.2) {
-                    std::printf("Match: %d -> %d\n", firstBest.queryIdx, firstBest.trainIdx);
+                if (ratio < 0.8) {
+                    //                    std::printf("Match: %d -> %d\n", firstBest.queryIdx, firstBest.trainIdx);
                     unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
                     goodMatches.push_back(firstBest);
                 }
@@ -124,15 +135,23 @@ int main() {
         }
     }
 
-    std::set<FeatureComponent> uniqueComponents;
-    for (size_t i = 0; i < featureGraph.size(); ++i) {
-        for (size_t f = 0; f < featureGraph[i].size(); ++f) {
-            if (!featureGraph[i][f].isReferenced) continue;
+    std::unordered_map<FeatureComponent, std::vector<ImageWithUniqueFeature>, FeatureComponentHash> uniqueComponents;
+    for (auto const& [component, _]: featureGraph) {
+        FeatureComponent const& root = findRoot(featureGraph, component);
+        uniqueComponents[root].emplace_back(component, images[component.imageIndex].keypoints[component.featureIndex]);
+    }
 
-            uniqueComponents.insert(findRoot(featureGraph, FeatureComponent{i, f}));
+    size_t i = 0;
+    for (auto const& [_, bruh]: uniqueComponents) {
+        std::cout << "New john" << ++i << std::endl;
+        for (auto& image: bruh) {
+            cv::Mat out;
+            cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, out);
+            cv::resize(out, out, {}, 0.8, 0.8);
+            cv::imshow("Keypoint", out);
+            cv::waitKey();
         }
     }
-    std::cout << "Unique components: " << uniqueComponents.size() << std::endl;
 
     //    std::vector<cv::Mat> uniqueDescriptors;
     //
