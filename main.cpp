@@ -1,4 +1,3 @@
-#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <gtsam/geometry/Point2.h>
@@ -13,8 +12,9 @@
 #include <opencv2/features2d.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
-#include <queue>
 #include <ranges>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 auto K = std::make_shared<gtsam::Cal3_S2>(960, 540, 0, 1344, 1344);
@@ -38,14 +38,24 @@ struct FeatureComponent {
     auto operator<=>(FeatureComponent const&) const = default;
 };
 
-struct ImageWithUniqueFeature {
-    FeatureComponent component;
-    cv::KeyPoint keypoint;
-};
-
 struct FeatureComponentHash {
     [[nodiscard]] size_t operator()(FeatureComponent const& component) const {
         return std::hash<img_idx_t>{}(component.imageIndex) ^ std::hash<feature_idx_t>{}(component.featureIndex);
+    }
+};
+
+struct ImageWithUniqueFeature {
+    FeatureComponent component;
+    cv::KeyPoint keypoint;
+
+    auto operator==(ImageWithUniqueFeature const& other) const {
+        return component.imageIndex == other.component.imageIndex;
+    }
+};
+
+struct ImageWithUniqueFeatureHash {
+    [[nodiscard]] size_t operator()(ImageWithUniqueFeature const& image) const {
+        return std::hash<img_idx_t>{}(image.component.imageIndex);
     }
 };
 
@@ -75,7 +85,7 @@ auto loadImages(fs::path const& imageDirectoryPath) {
     std::vector<Image> images;
     size_t i = 0;
     for (fs::directory_entry const& imagePath: fs::directory_iterator(imageDirectoryPath)) {
-        if (i++ == 3) break;
+        if (i++ == 50) break;
 
         std::cout << "\tLoading " << imagePath.path() << std::endl;
 
@@ -83,7 +93,7 @@ auto loadImages(fs::path const& imageDirectoryPath) {
         cv::Mat descriptors;
         std::vector<cv::KeyPoint> features;
 
-        cv::Ptr<cv::BRISK> descriptorExtractor = cv::BRISK::create();
+        cv::Ptr<cv::ORB> descriptorExtractor = cv::ORB::create();
 
         descriptorExtractor->detectAndCompute(mat, cv::noArray(), features, descriptors);
 
@@ -102,28 +112,37 @@ int main() {
     FeatureGraph featureGraph;
 
     for (size_t img1 = 0; img1 < images.size(); ++img1) {
-        for (size_t img2 = 0; img2 < images.size(); ++img2) {
-            if (img1 == img2) continue;
+        for (size_t img2 = img1 + 1; img2 < images.size(); ++img2) {
+            //            if (img1 == img2) continue;
 
             // TODO: try out cross check, alt. to rati otest
-            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
+            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING, true);
             using BestMatches = std::vector<cv::DMatch>;
             std::vector<BestMatches> matches;
-            matcher->knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 2);
+            matcher->knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 1);
 
             BestMatches goodMatches;
-            for (BestMatches const& bestMatch: matches) {
-                assert(bestMatch.size() == 2);
 
-                auto const& [firstBest, secondBest] = std::tuple{bestMatch[0], bestMatch[1]};
-                double ratio = firstBest.distance / secondBest.distance;
+            for (BestMatches const& bestMatch: matches | std::views::filter([](BestMatches const& bestMatch) { return !bestMatch.empty(); })) {
+                assert(bestMatch.size() == 1);
 
-                if (ratio < 0.8) {
-                    //                    std::printf("Match: %d -> %d\n", firstBest.queryIdx, firstBest.trainIdx);
-                    unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
-                    goodMatches.push_back(firstBest);
-                }
+                goodMatches.push_back(bestMatch[0]);
+                auto const& firstBest = bestMatch[0];
+                unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
             }
+
+            //            for (BestMatches const& bestMatch: matches) {
+            //                assert(bestMatch.size() == 2);
+            //
+            //                auto const& [firstBest, secondBest] = std::tuple{bestMatch[0], bestMatch[1]};
+            //                double ratio = firstBest.distance / secondBest.distance;
+            //
+            //                if (ratio < 0.8) {
+            //                    //                    std::printf("Match: %d -> %d\n", firstBest.queryIdx, firstBest.trainIdx);
+            //                    unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
+            //                    goodMatches.push_back(firstBest);
+            //                }
+            //            }
 
             //            cv::Mat m;
             //            cv::drawMatches(images[img1].mat, images[img1].keypoints,
@@ -135,15 +154,20 @@ int main() {
         }
     }
 
-    std::unordered_map<FeatureComponent, std::vector<ImageWithUniqueFeature>, FeatureComponentHash> uniqueComponents;
+    std::unordered_map<FeatureComponent, std::unordered_set<ImageWithUniqueFeature, ImageWithUniqueFeatureHash>, FeatureComponentHash> uniqueComponents;
     for (auto const& [component, _]: featureGraph) {
         FeatureComponent const& root = findRoot(featureGraph, component);
-        uniqueComponents[root].emplace_back(component, images[component.imageIndex].keypoints[component.featureIndex]);
+        uniqueComponents[root].emplace(component, images[component.imageIndex].keypoints[component.featureIndex]);
     }
+
+    std::printf("Unique components: %zu\n", uniqueComponents.size());
 
     size_t i = 0;
     for (auto const& [_, bruh]: uniqueComponents) {
+        if (bruh.size() < 9) continue;
         std::cout << "New john" << ++i << std::endl;
+        //        std::cout << "We got " << bruh.size() << " images" << std::endl;
+
         for (auto& image: bruh) {
             cv::Mat out;
             cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, out);
