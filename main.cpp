@@ -1,25 +1,38 @@
 #include <cstdlib>
 #include <filesystem>
-#include <gtsam/geometry/Point2.h>
-#include <gtsam/inference/Symbol.h>
-#include <gtsam/nonlinear/DoglegOptimizer.h>
-#include <gtsam/nonlinear/NonlinearFactorGraph.h>
-#include <gtsam/nonlinear/Values.h>
-#include <gtsam/slam/ProjectionFactor.h>
 #include <iostream>
-#include <opencv2/core/mat.hpp>
-#include <opencv2/core/types.hpp>
-#include <opencv2/features2d.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
 #include <ranges>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include <gtsam/inference/Symbol.h>
+#include <gtsam/nonlinear/DoglegOptimizer.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include <gtsam/nonlinear/Values.h>
+#include <gtsam/slam/ProjectionFactor.h>
+
+#include <opencv2/calib3d.hpp>
+#include <opencv2/core/eigen.hpp>
+#include <opencv2/core/mat.hpp>
+#include <opencv2/core/types.hpp>
+#include <opencv2/features2d.hpp>
+#include <opencv2/highgui.hpp>
+
+#include <Eigen/SVD>
+
 auto K = std::make_shared<gtsam::Cal3_S2>(960, 540, 0, 1344, 1344);
 
 namespace fs = std::filesystem;
+
+using gtsam::Matrix3;
+using gtsam::Matrix4;
+using gtsam::Point2;
+using gtsam::Point3;
+using gtsam::Pose3;
+using gtsam::Rot3;
+using gtsam::Vector;
+using gtsam::Vector3;
 
 struct Image {
     cv::Mat mat;
@@ -86,16 +99,16 @@ auto loadImages(fs::path const& imageDirectoryPath) {
     size_t i = 0;
 
     std::vector<fs::directory_entry> imagePaths;
-    for (auto const& entry: fs::directory_iterator(imageDirectoryPath)) {
-        imagePaths.push_back(entry);
-    }
+    std::ranges::copy(fs::directory_iterator(imageDirectoryPath), std::back_inserter(imagePaths));
+    //    for (auto const& entry: fs::directory_iterator(imageDirectoryPath)) {
+    //        imagePaths.push_back(entry);
+    //    }
     std::ranges::sort(imagePaths, [](fs::directory_entry const& a, fs::directory_entry const& b) {
         return a.path().stem().string() < b.path().stem().string();
     });
+    imagePaths.resize(30);
 
     for (fs::directory_entry const& imagePath: imagePaths) {
-        if (i++ == 30) break;
-
         std::cout << "\tLoading " << imagePath.path() << std::endl;
 
         cv::Mat mat = cv::imread(imagePath.path(), cv::IMREAD_COLOR);
@@ -169,77 +182,95 @@ int main() {
         }
     }
 
-    std::unordered_map<FeatureComponent, std::unordered_set<ImageWithUniqueFeature, ImageWithUniqueFeatureHash>, FeatureComponentHash> uniqueComponents;
+    using ImagesWithUniqueFeature = std::unordered_set<ImageWithUniqueFeature, ImageWithUniqueFeatureHash>;
+    std::unordered_map<FeatureComponent, ImagesWithUniqueFeature, FeatureComponentHash> uniqueComponents;
+    //    std::unordered_set<FeatureComponent, FeatureComponentHash> seenComponents;
+    std::vector<ImagesWithUniqueFeature> uniqueFeatures;
     for (auto const& [component, _]: featureGraph) {
         FeatureComponent const& root = findRoot(featureGraph, component);
         uniqueComponents[root].emplace(component, images[component.imageIndex].keypoints[component.featureIndex]);
     }
+    std::ranges::copy(uniqueComponents | std::views::values, std::back_inserter(uniqueFeatures));
 
-    std::printf("Unique components: %zu\n", uniqueComponents.size());
+    std::printf("Unique features: %zu\n", uniqueFeatures.size());
 
-    for (auto const& [_, uniqueFeature]: uniqueComponents) {
-        if (uniqueFeature.size() < 10) continue;
+    //    for (auto const& [_, uniqueFeature]: uniqueComponents) {
+    //        if (uniqueFeature.size() != 2) continue;
+    //
+    //        std::printf("Images: %zu\n", uniqueFeature.size());
+    //
+    //        for (auto& image: uniqueFeature) {
+    //            cv::Mat out = images[image.component.imageIndex].mat.clone();
+    //            //            cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, out);
+    //            cv::circle(out, image.keypoint.pt, 5, {0, 0, 255}, 2);
+    //            cv::resize(out, out, {}, 0.8, 0.8);
+    //            cv::imshow("Keypoint", out);
+    //            cv::waitKey();
+    //        }
+    //    }
 
-        std::printf("Images: %zu\n", uniqueFeature.size());
+    gtsam::NonlinearFactorGraph graph;
 
-        for (auto& image: uniqueFeature) {
-            cv::Mat out = images[image.component.imageIndex].mat.clone();
-            //            cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, out);
-            cv::circle(out, image.keypoint.pt, 5, {0, 0, 255}, 2);
-            cv::resize(out, out, {}, 0.8, 0.8);
-            cv::imshow("Keypoint", out);
-            cv::waitKey();
+    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas(
+            (Vector(6) << Vector3::Constant(0.1), Vector3::Constant(0.3))
+                    .finished());// 30cm std on x,y,z 0.1 rad on roll,pitch,yaw
+    graph.addPrior(gtsam::Symbol('x', 0), Pose3{}, poseNoise);
+
+    for (auto const& [featureId, uniqueFeature]: std::views::zip(std::views::iota(0uz), uniqueFeatures)) {
+        for (auto const& image: uniqueFeature) {
+            //            std::printf("Feature %zu in image %zu\n", featureId, image.component.imageIndex);
+            graph.emplace_shared<gtsam::GenericProjectionFactor<gtsam::Pose3, gtsam::Point3, gtsam::Cal3_S2>>(
+                    Point2(image.keypoint.pt.x, image.keypoint.pt.y),
+                    gtsam::noiseModel::Isotropic::Sigma(2, 1.0),
+                    gtsam::Symbol('x', image.component.imageIndex),
+                    gtsam::Symbol('l', featureId),
+                    K);
         }
     }
 
-    //    std::vector<cv::Mat> uniqueDescriptors;
-    //
-    //    auto matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::FLANNBASED);
-    //
-    //    std::vector<cv::DMatch> matches1;
-    //    matcher->match(images[1].descriptors, images[0].descriptors, matches1);
-    //
-    //    std::vector<cv::DMatch> matches2;
-    //    matcher->match(images[2].descriptors, images[0].descriptors, matches2);
+    auto pointNoise = gtsam::noiseModel::Isotropic::Sigma(3, 0.1);
+    graph.addPrior(gtsam::Symbol('l', 0), Point3{}, pointNoise);
 
-    //    gtsam::NonlinearFactorGraph graph;
-    //
-    //    graph.addPrior(gtsam::Symbol('x', 0), gtsam::Pose3(), gtsam::noiseModel::Isotropic::Sigma(6, 0.1));
-    //
-    //    for (size_t j = 0; j < images.size(); ++j) {
-    //        Image const& image = images[j];
-    //        for (size_t i = 0; i < image.features.size(); ++i) {
-    //            auto const& descriptor = image.descriptors.row(static_cast<int>(i));
-    //
-    //            auto it = std::ranges::find_if(uniqueDescriptors, [&](cv::Mat const& existingDescriptor) {
-    //                return cv::norm(existingDescriptor, descriptor) < 500.0;
-    //            });
-    //            if (it == uniqueDescriptors.end()) continue;
-    //
-    //            graph.emplace_shared<gtsam::GenericProjectionFactor<gtsam::Pose3, gtsam::Point3, gtsam::Cal3_S2>>(
-    //                    gtsam::Point2(image.features[i].pt.x, image.features[i].pt.y),
-    //                    gtsam::noiseModel::Isotropic::Sigma(2, 1.0),
-    //                    gtsam::Symbol('x', j),
-    //                    gtsam::Symbol('l', std::distance(uniqueDescriptors.begin(), it)),
-    //                    K);
-    //        }
-    //    }
-    //
-    //    graph.addPrior(gtsam::Symbol('l', 0), gtsam::Point3(), gtsam::noiseModel::Isotropic::Sigma(3, 0.1));
-    //
-    //    gtsam::Values initial;
-    //    for (size_t i = 0; i < images.size(); ++i) {
-    //        initial.insert(gtsam::Symbol('x', i), gtsam::Pose3());
-    //    }
-    //    for (size_t i = 0; i < uniqueDescriptors.size(); ++i) {
-    //        initial.insert(gtsam::Symbol('l', i), gtsam::Point3());
-    //    }
-    //
-    //    gtsam::Values result = gtsam::DoglegOptimizer(graph, initial).optimize();
-    //    result.print("result: ");
+    gtsam::Values initial;
 
-    // TODO: Average descriptor values
-    // TODO: Implement better matching
+    Pose3 initialPose{};
+    initial.insert(gtsam::Symbol('x', 0), initialPose);
+    for (size_t i = 1; i < images.size(); ++i) {
+        Image const& image1 = images[i - 1];
+        Image const& image2 = images[i];
+
+        std::vector<cv::Point2f> points1;
+        std::ranges::copy(image1.keypoints | std::views::transform([](cv::KeyPoint const& keypoint) { return keypoint.pt; }), std::back_inserter(points1));
+        std::vector<cv::Point2f> points2;
+        std::ranges::copy(image2.keypoints | std::views::transform([](cv::KeyPoint const& keypoint) { return keypoint.pt; }), std::back_inserter(points2));
+
+        cv::Mat Kcv;
+        cv::eigen2cv(K->K(), Kcv);
+        cv::Mat Ecv = cv::findEssentialMat(points1, points2, Kcv, cv::RANSAC, 0.999, 1.0);
+
+        Matrix3 E;
+        cv::cv2eigen(Ecv, E);
+
+        Eigen::JacobiSVD<Matrix3> svd(E, Eigen::ComputeFullU | Eigen::ComputeFullV);
+        Matrix3 U = svd.matrixU();
+        Matrix3 V = svd.matrixV();
+
+        Vector3 t = U.col(2);
+        Rot3 R{U * V.transpose()};
+        Pose3 pose{R, t};
+
+        std::cout << "Pose: " << pose << std::endl;
+
+        initialPose = initialPose.compose(pose);
+        initial.insert(gtsam::Symbol('x', i), initialPose);
+    }
+
+    for (size_t i = 0; i < uniqueFeatures.size(); ++i) {
+        initial.insert(gtsam::Symbol('l', i), Point3{});
+    }
+
+    gtsam::Values result = gtsam::DoglegOptimizer(graph, initial).optimize();
+    result.print("result: ");
 
     return EXIT_SUCCESS;
 }
