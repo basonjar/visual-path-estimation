@@ -1,25 +1,4 @@
-#include <cstdlib>
-#include <filesystem>
-#include <iostream>
-#include <ranges>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
-#include <gtsam/inference/Symbol.h>
-#include <gtsam/nonlinear/DoglegOptimizer.h>
-#include <gtsam/nonlinear/NonlinearFactorGraph.h>
-#include <gtsam/nonlinear/Values.h>
-#include <gtsam/slam/ProjectionFactor.h>
-
-#include <opencv2/calib3d.hpp>
-#include <opencv2/core/eigen.hpp>
-#include <opencv2/core/mat.hpp>
-#include <opencv2/core/types.hpp>
-#include <opencv2/features2d.hpp>
-#include <opencv2/highgui.hpp>
-
-#include <Eigen/SVD>
+#include "pch.h"
 
 auto K = std::make_shared<gtsam::Cal3_S2>(960, 540, 0, 1344, 1344);
 
@@ -74,12 +53,10 @@ struct ImageWithUniqueFeatureHash {
 
 using FeatureGraph = std::unordered_map<FeatureComponent, FeatureComponent, FeatureComponentHash>;
 
-[[nodiscard]] FeatureComponent& findRoot(FeatureGraph& graph, FeatureComponent const& component) {
+[[nodiscard]] FeatureComponent& findRoot(FeatureGraph& graph, FeatureComponent const& component) {// NOLINT(misc-no-recursion)
     auto it = graph.find(component);
-    if (it == graph.end()) {
-        auto it = graph.emplace(component, component);
-        return it.first->second;
-    }
+    if (it == graph.end()) return graph[component] = component;
+
     auto& [_, parent] = *it;
     return parent == component ? parent : findRoot(graph, parent);
 }
@@ -95,32 +72,28 @@ void unionComponents(FeatureGraph& graph, FeatureComponent const& a, FeatureComp
 
 auto loadImages(fs::path const& imageDirectoryPath) {
     std::cout << "Loading images from " << imageDirectoryPath.stem() << std::endl;
-    std::vector<Image> images;
-    size_t i = 0;
 
     std::vector<fs::directory_entry> imagePaths;
     std::ranges::copy(fs::directory_iterator(imageDirectoryPath), std::back_inserter(imagePaths));
-    //    for (auto const& entry: fs::directory_iterator(imageDirectoryPath)) {
-    //        imagePaths.push_back(entry);
-    //    }
     std::ranges::sort(imagePaths, [](fs::directory_entry const& a, fs::directory_entry const& b) {
         return a.path().stem().string() < b.path().stem().string();
     });
     imagePaths.resize(30);
 
-    for (fs::directory_entry const& imagePath: imagePaths) {
-        std::cout << "\tLoading " << imagePath.path() << std::endl;
+    std::vector<Image> images;
+    std::ranges::copy(imagePaths | std::views::transform([](fs::directory_entry const& imagePath) {
+                          std::cout << "\tLoading " << imagePath.path() << std::endl;
 
-        cv::Mat mat = cv::imread(imagePath.path(), cv::IMREAD_COLOR);
-        cv::Mat descriptors;
-        std::vector<cv::KeyPoint> features;
+                          cv::Mat mat = cv::imread(imagePath.path(), cv::IMREAD_COLOR);
+                          cv::Mat descriptors;
+                          std::vector<cv::KeyPoint> features;
 
-        cv::Ptr<cv::ORB> descriptorExtractor = cv::ORB::create();
+                          cv::Ptr<cv::ORB> descriptorExtractor = cv::ORB::create();
+                          descriptorExtractor->detectAndCompute(mat, cv::noArray(), features, descriptors);
 
-        descriptorExtractor->detectAndCompute(mat, cv::noArray(), features, descriptors);
-
-        images.emplace_back(Image{mat, features, descriptors});
-    }
+                          return Image{mat, features, descriptors};
+                      }),
+                      std::back_inserter(images));
     return images;
 }
 
@@ -152,9 +125,10 @@ int main() {
             //                unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
             //            }
 
-            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
             using BestMatches = std::vector<cv::DMatch>;
             std::vector<BestMatches> matches;
+
+            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
             matcher->knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 2);
 
             BestMatches goodMatches;
@@ -162,7 +136,7 @@ int main() {
             for (BestMatches const& bestMatch: matches) {
                 assert(bestMatch.size() == 2);
 
-                auto const& [firstBest, secondBest] = std::tuple{bestMatch[0], bestMatch[1]};
+                cv::DMatch const &firstBest = bestMatch[0], &secondBest = bestMatch[1];
                 double ratio = firstBest.distance / secondBest.distance;
 
                 if (ratio < 0.4) {
@@ -184,7 +158,6 @@ int main() {
 
     using ImagesWithUniqueFeature = std::unordered_set<ImageWithUniqueFeature, ImageWithUniqueFeatureHash>;
     std::unordered_map<FeatureComponent, ImagesWithUniqueFeature, FeatureComponentHash> uniqueComponents;
-    //    std::unordered_set<FeatureComponent, FeatureComponentHash> seenComponents;
     std::vector<ImagesWithUniqueFeature> uniqueFeatures;
     for (auto const& [component, _]: featureGraph) {
         FeatureComponent const& root = findRoot(featureGraph, component);
@@ -231,10 +204,15 @@ int main() {
     auto pointNoise = gtsam::noiseModel::Isotropic::Sigma(3, 0.1);
     graph.addPrior(gtsam::Symbol('l', 0), Point3{}, pointNoise);
 
+    pcl::visualization::PCLVisualizer viewer("3D Viewer");
+    viewer.setBackgroundColor(0, 0, 0);
+    viewer.addCoordinateSystem(1.0);
+    viewer.initCameraParameters();
+
     gtsam::Values initial;
 
-    Pose3 initialPose{};
-    initial.insert(gtsam::Symbol('x', 0), initialPose);
+    Pose3 currentPose{};
+    initial.insert(gtsam::Symbol('x', 0), currentPose);
     for (size_t i = 1; i < images.size(); ++i) {
         Image const& image1 = images[i - 1];
         Image const& image2 = images[i];
@@ -254,16 +232,31 @@ int main() {
         Eigen::JacobiSVD<Matrix3> svd(E, Eigen::ComputeFullU | Eigen::ComputeFullV);
         Matrix3 U = svd.matrixU();
         Matrix3 V = svd.matrixV();
+        Matrix3 W = (Matrix3() << 0, -1, 0, 1, 0, 0, 0, 0, 1).finished();
 
         Vector3 t = U.col(2);
-        Rot3 R{U * V.transpose()};
+        Rot3 R{U * W * V.transpose()};
         Pose3 pose{R, t};
 
         std::cout << "Pose: " << pose << std::endl;
 
-        initialPose = initialPose.compose(pose);
-        initial.insert(gtsam::Symbol('x', i), initialPose);
+        currentPose = currentPose.compose(pose);
+        initial.insert(gtsam::Symbol('x', i), currentPose);
+
+        pcl::PointXYZ pointPcl;
+        pointPcl.x = currentPose.translation().x();
+        pointPcl.y = currentPose.translation().y();
+        pointPcl.z = currentPose.translation().z();
+        pcl::PointXYZ pointPclTip;
+        pointPclTip.x = currentPose.translation().x() + R.column(2).x();
+        pointPclTip.y = currentPose.translation().y() + R.column(2).y();
+        pointPclTip.z = currentPose.translation().z() + R.column(2).z();
+        //        viewer.addSphere(pointPcl, 0.1, 1.0, 0, 0, name);
+        viewer.addLine(pointPcl, pointPclTip, 1, 0, 0, "arrow" + std::to_string(i));
+        viewer.addText3D(std::to_string(i), pointPcl, 0.15, 0, 0, 1, std::to_string(i));
     }
+
+    viewer.spin();
 
     for (size_t i = 0; i < uniqueFeatures.size(); ++i) {
         initial.insert(gtsam::Symbol('l', i), Point3{});
