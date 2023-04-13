@@ -84,8 +84,17 @@ auto loadImages(fs::path const& imageDirectoryPath) {
     std::cout << "Loading images from " << imageDirectoryPath.stem() << std::endl;
     std::vector<Image> images;
     size_t i = 0;
-    for (fs::directory_entry const& imagePath: fs::directory_iterator(imageDirectoryPath)) {
-        if (i++ == 50) break;
+
+    std::vector<fs::directory_entry> imagePaths;
+    for (auto const& entry: fs::directory_iterator(imageDirectoryPath)) {
+        imagePaths.push_back(entry);
+    }
+    std::ranges::sort(imagePaths, [](fs::directory_entry const& a, fs::directory_entry const& b) {
+        return a.path().stem().string() < b.path().stem().string();
+    });
+
+    for (fs::directory_entry const& imagePath: imagePaths) {
+        if (i++ == 30) break;
 
         std::cout << "\tLoading " << imagePath.path() << std::endl;
 
@@ -115,34 +124,40 @@ int main() {
         for (size_t img2 = img1 + 1; img2 < images.size(); ++img2) {
             //            if (img1 == img2) continue;
 
-            // TODO: try out cross check, alt. to rati otest
-            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING, true);
+            //            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING, true);
+            //            using BestMatches = std::vector<cv::DMatch>;
+            //            std::vector<BestMatches> matches;
+            //            matcher->knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 1);
+            //
+            //            BestMatches goodMatches;
+            //
+            //            for (BestMatches const& bestMatch: matches | std::views::filter([](BestMatches const& bestMatch) { return !bestMatch.empty(); })) {
+            //                assert(bestMatch.size() == 1);
+            //
+            //                goodMatches.push_back(bestMatch[0]);
+            //                auto const& firstBest = bestMatch[0];
+            //                unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
+            //            }
+
+            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
             using BestMatches = std::vector<cv::DMatch>;
             std::vector<BestMatches> matches;
-            matcher->knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 1);
+            matcher->knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 2);
 
             BestMatches goodMatches;
 
-            for (BestMatches const& bestMatch: matches | std::views::filter([](BestMatches const& bestMatch) { return !bestMatch.empty(); })) {
-                assert(bestMatch.size() == 1);
+            for (BestMatches const& bestMatch: matches) {
+                assert(bestMatch.size() == 2);
 
-                goodMatches.push_back(bestMatch[0]);
-                auto const& firstBest = bestMatch[0];
-                unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
+                auto const& [firstBest, secondBest] = std::tuple{bestMatch[0], bestMatch[1]};
+                double ratio = firstBest.distance / secondBest.distance;
+
+                if (ratio < 0.4) {
+                    //                    std::printf("Match: %d -> %d\n", firstBest.queryIdx, firstBest.trainIdx);
+                    unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
+                    goodMatches.push_back(firstBest);
+                }
             }
-
-            //            for (BestMatches const& bestMatch: matches) {
-            //                assert(bestMatch.size() == 2);
-            //
-            //                auto const& [firstBest, secondBest] = std::tuple{bestMatch[0], bestMatch[1]};
-            //                double ratio = firstBest.distance / secondBest.distance;
-            //
-            //                if (ratio < 0.8) {
-            //                    //                    std::printf("Match: %d -> %d\n", firstBest.queryIdx, firstBest.trainIdx);
-            //                    unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
-            //                    goodMatches.push_back(firstBest);
-            //                }
-            //            }
 
             //            cv::Mat m;
             //            cv::drawMatches(images[img1].mat, images[img1].keypoints,
@@ -162,15 +177,15 @@ int main() {
 
     std::printf("Unique components: %zu\n", uniqueComponents.size());
 
-    size_t i = 0;
-    for (auto const& [_, bruh]: uniqueComponents) {
-        if (bruh.size() < 9) continue;
-        std::cout << "New john" << ++i << std::endl;
-        //        std::cout << "We got " << bruh.size() << " images" << std::endl;
+    for (auto const& [_, uniqueFeature]: uniqueComponents) {
+        if (uniqueFeature.size() < 10) continue;
 
-        for (auto& image: bruh) {
-            cv::Mat out;
-            cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, out);
+        std::printf("Images: %zu\n", uniqueFeature.size());
+
+        for (auto& image: uniqueFeature) {
+            cv::Mat out = images[image.component.imageIndex].mat.clone();
+            //            cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, out);
+            cv::circle(out, image.keypoint.pt, 5, {0, 0, 255}, 2);
             cv::resize(out, out, {}, 0.8, 0.8);
             cv::imshow("Keypoint", out);
             cv::waitKey();
