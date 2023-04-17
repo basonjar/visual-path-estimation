@@ -1,5 +1,7 @@
 #include "pch.h"
 
+#include "utils.hpp"
+
 auto K = std::make_shared<gtsam::Cal3_S2>(960, 540, 0, 1344, 1344);
 
 namespace fs = std::filesystem;
@@ -73,27 +75,25 @@ void unionComponents(FeatureGraph& graph, FeatureComponent const& a, FeatureComp
 auto loadImages(fs::path const& imageDirectoryPath) {
     std::cout << "Loading images from " << imageDirectoryPath.stem() << std::endl;
 
-    std::vector<fs::directory_entry> imagePaths;
-    std::ranges::copy(fs::directory_iterator(imageDirectoryPath), std::back_inserter(imagePaths));
+    auto imagePaths = fs::directory_iterator(imageDirectoryPath) | collect<std::vector<fs::directory_entry>>();
     std::ranges::sort(imagePaths, [](fs::directory_entry const& a, fs::directory_entry const& b) {
         return a.path().stem().string() < b.path().stem().string();
     });
     imagePaths.resize(30);
 
-    std::vector<Image> images;
-    std::ranges::copy(imagePaths | std::views::transform([](fs::directory_entry const& imagePath) {
-                          std::cout << "\tLoading " << imagePath.path() << std::endl;
+    auto images = imagePaths | std::views::transform([](fs::directory_entry const& imagePath) {
+                      std::cout << "\tLoading " << imagePath.path() << std::endl;
 
-                          cv::Mat mat = cv::imread(imagePath.path(), cv::IMREAD_COLOR);
-                          cv::Mat descriptors;
-                          std::vector<cv::KeyPoint> features;
+                      cv::Mat mat = cv::imread(imagePath.path(), cv::IMREAD_COLOR);
+                      cv::Mat descriptors;
+                      std::vector<cv::KeyPoint> features;
 
-                          cv::Ptr<cv::ORB> descriptorExtractor = cv::ORB::create();
-                          descriptorExtractor->detectAndCompute(mat, cv::noArray(), features, descriptors);
+                      cv::Ptr<cv::ORB> descriptorExtractor = cv::ORB::create();
+                      descriptorExtractor->detectAndCompute(mat, cv::noArray(), features, descriptors);
 
-                          return Image{mat, features, descriptors};
-                      }),
-                      std::back_inserter(images));
+                      return Image{mat, features, descriptors};
+                  }) |
+                  collect<std::vector<Image>>();
     return images;
 }
 
@@ -158,12 +158,11 @@ int main() {
 
     using ImagesWithUniqueFeature = std::unordered_set<ImageWithUniqueFeature, ImageWithUniqueFeatureHash>;
     std::unordered_map<FeatureComponent, ImagesWithUniqueFeature, FeatureComponentHash> uniqueComponents;
-    std::vector<ImagesWithUniqueFeature> uniqueFeatures;
     for (auto const& [component, _]: featureGraph) {
         FeatureComponent const& root = findRoot(featureGraph, component);
         uniqueComponents[root].emplace(component, images[component.imageIndex].keypoints[component.featureIndex]);
     }
-    std::ranges::copy(uniqueComponents | std::views::values, std::back_inserter(uniqueFeatures));
+    auto uniqueFeatures = uniqueComponents | std::views::values | collect<std::vector<ImagesWithUniqueFeature>>();
 
     std::printf("Unique features: %zu\n", uniqueFeatures.size());
 
@@ -189,8 +188,8 @@ int main() {
                     .finished());// 30cm std on x,y,z 0.1 rad on roll,pitch,yaw
     graph.addPrior(gtsam::Symbol('x', 0), Pose3{}, poseNoise);
 
-    for (auto const& [featureId, uniqueFeature]: std::views::zip(std::views::iota(0uz), uniqueFeatures)) {
-        for (auto const& image: uniqueFeature) {
+    for (auto const& [featureId, imagesWithUniqueFeature]: uniqueFeatures | enumerate()) {
+        for (auto const& image: imagesWithUniqueFeature) {
             //            std::printf("Feature %zu in image %zu\n", featureId, image.component.imageIndex);
             graph.emplace_shared<gtsam::GenericProjectionFactor<gtsam::Pose3, gtsam::Point3, gtsam::Cal3_S2>>(
                     Point2(image.keypoint.pt.x, image.keypoint.pt.y),
@@ -217,10 +216,9 @@ int main() {
         Image const& image1 = images[i - 1];
         Image const& image2 = images[i];
 
-        std::vector<cv::Point2f> points1;
-        std::ranges::copy(image1.keypoints | std::views::transform([](cv::KeyPoint const& keypoint) { return keypoint.pt; }), std::back_inserter(points1));
-        std::vector<cv::Point2f> points2;
-        std::ranges::copy(image2.keypoints | std::views::transform([](cv::KeyPoint const& keypoint) { return keypoint.pt; }), std::back_inserter(points2));
+        auto extractPoint = [](cv::KeyPoint const& keypoint) { return keypoint.pt; };
+        auto points1 = image1.keypoints | std::views::transform(extractPoint) | collect<std::vector<cv::Point2f>>();
+        auto points2 = image2.keypoints | std::views::transform(extractPoint) | collect<std::vector<cv::Point2f>>();
 
         cv::Mat Kcv;
         cv::eigen2cv(K->K(), Kcv);
