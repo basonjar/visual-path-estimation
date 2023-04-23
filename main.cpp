@@ -1,8 +1,11 @@
 #include "pch.h"
 
 #include "utils.hpp"
+#include <gtsam/geometry/Point3.h>
 
 auto K = std::make_shared<gtsam::Cal3_S2>(960, 540, 0, 1344, 1344);
+constexpr float RATIO_THRESHOLD = 0.4f;
+constexpr size_t IMAGE_COUNT = 30;
 
 namespace fs = std::filesystem;
 
@@ -79,7 +82,7 @@ auto loadImages(fs::path const& imageDirectoryPath) {
     std::ranges::sort(imagePaths, [](fs::directory_entry const& a, fs::directory_entry const& b) {
         return a.path().stem().string() < b.path().stem().string();
     });
-    imagePaths.resize(30);
+    imagePaths.resize(IMAGE_COUNT);
 
     auto images = imagePaths | std::views::transform([](fs::directory_entry const& imagePath) {
                       std::cout << "\tLoading " << imagePath.path() << std::endl;
@@ -128,8 +131,8 @@ int main() {
             using BestMatches = std::vector<cv::DMatch>;
             std::vector<BestMatches> matches;
 
-            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
-            matcher->knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 2);
+            cv::BFMatcher matcher{cv::NORM_HAMMING};
+            matcher.knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 2);
 
             BestMatches goodMatches;
 
@@ -139,7 +142,7 @@ int main() {
                 cv::DMatch const &firstBest = bestMatch[0], &secondBest = bestMatch[1];
                 double ratio = firstBest.distance / secondBest.distance;
 
-                if (ratio < 0.4) {
+                if (ratio < RATIO_THRESHOLD) {
                     //                    std::printf("Match: %d -> %d\n", firstBest.queryIdx, firstBest.trainIdx);
                     unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
                     goodMatches.push_back(firstBest);
@@ -209,15 +212,7 @@ int main() {
         }
     }
 
-    //    graph.saveGraph("boingus");
-
-    // Because the structure-from-motion problem has a scale ambiguity, the
-    // problem is still under-constrained Here we add a prior on the position of
-    // the first landmark. This fixes the scale by indicating the distance between
-    // the first camera and the first landmark. All other landmark positions are
-    // interpreted using this scale.
-    //    auto pointNoise = gtsam::noiseModel::Isotropic::Sigma(3, 0.1);
-    //    graph.addPrior(gtsam::Symbol('l', 0), Point3{}, pointNoise);
+    //    graph.saveGraph("graph.dot");
 
     pcl::visualization::PCLVisualizer viewer("3D Viewer");
     viewer.setBackgroundColor(0, 0, 0);
@@ -226,15 +221,19 @@ int main() {
 
     gtsam::Values initial;
 
-    Pose3 currentPose{};
+    Pose3 currentPose = Pose3::Identity();
     initial.insert(gtsam::Symbol('x', 0), currentPose);
+
     for (uint64_t i = 1; i < images.size(); ++i) {
         Image const& image1 = images[i - 1];
         Image const& image2 = images[i];
 
-        auto extractPoint = [](cv::KeyPoint const& keypoint) { return keypoint.pt; };
-        auto points1 = image1.keypoints | std::views::transform(extractPoint) | collect<std::vector<cv::Point2f>>();
-        auto points2 = image2.keypoints | std::views::transform(extractPoint) | collect<std::vector<cv::Point2f>>();
+        cv::BFMatcher matcher{cv::NORM_L2, true};
+        std::vector<cv::DMatch> matches;
+        matcher.match(image1.descriptors, image2.descriptors, matches);
+
+        auto points1 = matches | std::views::transform([&](auto const& match) { return image1.keypoints[match.queryIdx].pt; }) | collect<std::vector<cv::Point2f>>();
+        auto points2 = matches | std::views::transform([&](auto const& match) { return image2.keypoints[match.trainIdx].pt; }) | collect<std::vector<cv::Point2f>>();
 
         cv::Mat Kcv;
         cv::eigen2cv(K->K(), Kcv);
@@ -248,25 +247,26 @@ int main() {
         Point3 t;
         cv::cv2eigen(tcv, t);
 
-        Pose3 pose{Rot3{R}, t};
+        std::cout << "IMAGE DELTA:" << std::endl;
+        std::cout << "Translation: " << t << std::endl;
+        std::cout << "Rotation: " << R.eulerAngles(0, 1, 2) << std::endl;
 
-        currentPose = currentPose.compose(pose);
+        Pose3 pose{Rot3{R}, t * 0.1};
+
+        currentPose = currentPose * pose;
+
         initial.insert(gtsam::Symbol('x', i), currentPose);
 
-        pcl::PointXYZ pointPcl;
-        pointPcl.x = currentPose.translation().x();
-        pointPcl.y = currentPose.translation().y();
-        pointPcl.z = currentPose.translation().z();
-        pcl::PointXYZ pointPclTip;
-        pointPclTip.x = currentPose.translation().x() + currentPose.rotation().matrix().col(2).x();
-        pointPclTip.y = currentPose.translation().y() + currentPose.rotation().matrix().col(2).y();
-        pointPclTip.z = currentPose.translation().z() + currentPose.rotation().matrix().col(2).z();
+        Point3 origin = currentPose* Point3{0, 0, 0};
+        Point3 tip = currentPose* Point3{0, 0, 1};
+
+        pcl::PointXYZ pointPcl(origin.x(), origin.y(), origin.z());
+        pcl::PointXYZ pointPclTip(tip.x(), tip.y(), tip.z());
+
         //        viewer.addSphere(pointPcl, 0.1, 1.0, 0, 0, name);
         viewer.addLine(pointPcl, pointPclTip, 1, 0, 0, "arrow" + std::to_string(i));
         viewer.addText3D(std::to_string(i), pointPcl, 0.15, 0, 0, 1, std::to_string(i));
     }
-
-    //    viewer.spin();
 
     for (uint64_t i = 0; i < uniqueFeatures.size(); ++i) {
         initial.insert(gtsam::Symbol('l', i), Point3{});
@@ -274,6 +274,8 @@ int main() {
 
     gtsam::Values result = gtsam::DoglegOptimizer(graph, initial).optimize();
     result.print("result: ");
+
+    viewer.spin();
 
     return EXIT_SUCCESS;
 }
