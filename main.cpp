@@ -1,11 +1,10 @@
 #include "pch.h"
 
 #include "utils.hpp"
-#include <gtsam/geometry/Point3.h>
 
 auto K = std::make_shared<gtsam::Cal3_S2>(960, 540, 0, 1344, 1344);
-constexpr float RATIO_THRESHOLD = 0.4f;
-constexpr size_t IMAGE_COUNT = 30;
+constexpr float RATIO_THRESHOLD = 0.3f;
+constexpr size_t IMAGE_COUNT = 4;
 
 namespace fs = std::filesystem;
 
@@ -187,19 +186,20 @@ int main() {
     gtsam::NonlinearFactorGraph graph;
 
     // Add a prior on pose x1. This indirectly specifies where the origin is.
-    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(0.5), Vector3::Constant(2.0)).finished());// rpy (rad) then xyz (m)
+    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(M_PI_2), Vector3::Constant(100.0)).finished());// rpy (rad) then xyz (m)
     graph.addPrior(gtsam::Symbol('x', 0), Pose3::Identity(), poseNoise);
 
-    for (uint64_t i = 1; i < images.size(); ++i) {
-        graph.emplace_shared<gtsam::BetweenFactor<Pose3>>(
-                gtsam::Symbol('x', i - 1), gtsam::Symbol('x', i),
-                Pose3::Identity(),
-                poseNoise);
-    }
+    //    for (uint64_t i = 1; i < images.size(); ++i) {
+    //        graph.emplace_shared<gtsam::BetweenFactor<Pose3>>(
+    //                gtsam::Symbol('x', i - 1), gtsam::Symbol('x', i),
+    //                Pose3::Identity(),
+    //                poseNoise);
+    //    }
 
-    auto featureNoise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0);
+    size_t added = 0;
+    auto featureNoise = gtsam::noiseModel::Isotropic::Sigma(2, 0.1);
     for (auto const& [featureId, imagesWithUniqueFeature]: uniqueFeatures | enumerate()) {
-        if (imagesWithUniqueFeature.size() < 10) break;// TODO change to 10 and tune
+        if (imagesWithUniqueFeature.size() != 4) continue;
 
         for (auto const& image: imagesWithUniqueFeature) {
             //            std::printf("Feature %zu in image %zu\n", featureId, image.component.imageIndex);
@@ -209,10 +209,12 @@ int main() {
                     gtsam::Symbol('x', image.component.imageIndex),
                     gtsam::Symbol('l', featureId),
                     K);
+            ++added;
         }
     }
+    if (added == 0) throw std::runtime_error("No constraints added!");
 
-    //    graph.saveGraph("graph.dot");
+    graph.saveGraph("graph.dot");
 
     pcl::visualization::PCLVisualizer viewer("3D Viewer");
     viewer.setBackgroundColor(0, 0, 0);
@@ -221,8 +223,8 @@ int main() {
 
     gtsam::Values initial;
 
-    Pose3 currentPose = Pose3::Identity();
-    initial.insert(gtsam::Symbol('x', 0), currentPose);
+    Pose3 globalPose = Pose3::Identity();
+    initial.insert(gtsam::Symbol('x', 0), globalPose);
 
     for (uint64_t i = 1; i < images.size(); ++i) {
         Image const& image1 = images[i - 1];
@@ -247,18 +249,18 @@ int main() {
         Point3 t;
         cv::cv2eigen(tcv, t);
 
-        std::cout << "IMAGE DELTA:" << std::endl;
-        std::cout << "Translation: " << t << std::endl;
-        std::cout << "Rotation: " << R.eulerAngles(0, 1, 2) << std::endl;
+        //        std::cout << "IMAGE DELTA:" << std::endl;
+        //        std::cout << "Translation: " << t << std::endl;
+        //        std::cout << "Rotation: " << R.eulerAngles(0, 1, 2) << std::endl;
 
-        Pose3 pose{Rot3{R}, t * 0.1};
+        Pose3 poseBetween{Rot3{R}, t * 0.3};
 
-        currentPose = currentPose * pose;
+        globalPose = globalPose * poseBetween;
 
-        initial.insert(gtsam::Symbol('x', i), currentPose);
+        initial.insert(gtsam::Symbol('x', i), globalPose);
 
-        Point3 origin = currentPose* Point3{0, 0, 0};
-        Point3 tip = currentPose* Point3{0, 0, 1};
+        Point3 origin = globalPose* Point3{0, 0, 0};
+        Point3 tip = globalPose* Point3{0, 0, 1};
 
         pcl::PointXYZ pointPcl(origin.x(), origin.y(), origin.z());
         pcl::PointXYZ pointPclTip(tip.x(), tip.y(), tip.z());
@@ -272,7 +274,8 @@ int main() {
         initial.insert(gtsam::Symbol('l', i), Point3{});
     }
 
-    gtsam::Values result = gtsam::DoglegOptimizer(graph, initial).optimize();
+    gtsam::DoglegParams params;
+    gtsam::Values result = gtsam::DoglegOptimizer(graph, initial, params).optimize();
     result.print("result: ");
 
     viewer.spin();
