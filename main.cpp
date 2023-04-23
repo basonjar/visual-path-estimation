@@ -183,25 +183,41 @@ int main() {
 
     gtsam::NonlinearFactorGraph graph;
 
-    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas(
-            (Vector(6) << Vector3::Constant(0.1), Vector3::Constant(0.3))
-                    .finished());// 30cm std on x,y,z 0.1 rad on roll,pitch,yaw
-    graph.addPrior(gtsam::Symbol('x', 0), Pose3{}, poseNoise);
+    // Add a prior on pose x1. This indirectly specifies where the origin is.
+    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(0.5), Vector3::Constant(2.0)).finished());// rpy (rad) then xyz (m)
+    graph.addPrior(gtsam::Symbol('x', 0), Pose3::Identity(), poseNoise);
 
+    for (uint64_t i = 1; i < images.size(); ++i) {
+        graph.emplace_shared<gtsam::BetweenFactor<Pose3>>(
+                gtsam::Symbol('x', i - 1), gtsam::Symbol('x', i),
+                Pose3::Identity(),
+                poseNoise);
+    }
+
+    auto featureNoise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0);
     for (auto const& [featureId, imagesWithUniqueFeature]: uniqueFeatures | enumerate()) {
+        if (imagesWithUniqueFeature.size() < 10) break;// TODO change to 10 and tune
+
         for (auto const& image: imagesWithUniqueFeature) {
             //            std::printf("Feature %zu in image %zu\n", featureId, image.component.imageIndex);
             graph.emplace_shared<gtsam::GenericProjectionFactor<gtsam::Pose3, gtsam::Point3, gtsam::Cal3_S2>>(
                     Point2(image.keypoint.pt.x, image.keypoint.pt.y),
-                    gtsam::noiseModel::Isotropic::Sigma(2, 1.0),
+                    featureNoise,
                     gtsam::Symbol('x', image.component.imageIndex),
                     gtsam::Symbol('l', featureId),
                     K);
         }
     }
 
-    auto pointNoise = gtsam::noiseModel::Isotropic::Sigma(3, 0.1);
-    graph.addPrior(gtsam::Symbol('l', 0), Point3{}, pointNoise);
+    //    graph.saveGraph("boingus");
+
+    // Because the structure-from-motion problem has a scale ambiguity, the
+    // problem is still under-constrained Here we add a prior on the position of
+    // the first landmark. This fixes the scale by indicating the distance between
+    // the first camera and the first landmark. All other landmark positions are
+    // interpreted using this scale.
+    //    auto pointNoise = gtsam::noiseModel::Isotropic::Sigma(3, 0.1);
+    //    graph.addPrior(gtsam::Symbol('l', 0), Point3{}, pointNoise);
 
     pcl::visualization::PCLVisualizer viewer("3D Viewer");
     viewer.setBackgroundColor(0, 0, 0);
@@ -212,7 +228,7 @@ int main() {
 
     Pose3 currentPose{};
     initial.insert(gtsam::Symbol('x', 0), currentPose);
-    for (size_t i = 1; i < images.size(); ++i) {
+    for (uint64_t i = 1; i < images.size(); ++i) {
         Image const& image1 = images[i - 1];
         Image const& image2 = images[i];
 
@@ -222,21 +238,17 @@ int main() {
 
         cv::Mat Kcv;
         cv::eigen2cv(K->K(), Kcv);
+
         cv::Mat Ecv = cv::findEssentialMat(points1, points2, Kcv, cv::RANSAC, 0.999, 1.0);
+        cv::Mat Rcv, tcv;
+        cv::recoverPose(Ecv, points1, points2, Kcv, Rcv, tcv);
 
-        Matrix3 E;
-        cv::cv2eigen(Ecv, E);
+        Matrix3 R;
+        cv::cv2eigen(Rcv, R);
+        Point3 t;
+        cv::cv2eigen(tcv, t);
 
-        Eigen::JacobiSVD<Matrix3> svd(E, Eigen::ComputeFullU | Eigen::ComputeFullV);
-        Matrix3 U = svd.matrixU();
-        Matrix3 V = svd.matrixV();
-        Matrix3 W = (Matrix3() << 0, -1, 0, 1, 0, 0, 0, 0, 1).finished();
-
-        Vector3 t = U.col(2);
-        Rot3 R{U * W * V.transpose()};
-        Pose3 pose{R, t};
-
-        std::cout << "Pose: " << pose << std::endl;
+        Pose3 pose{Rot3{R}, t};
 
         currentPose = currentPose.compose(pose);
         initial.insert(gtsam::Symbol('x', i), currentPose);
@@ -246,17 +258,17 @@ int main() {
         pointPcl.y = currentPose.translation().y();
         pointPcl.z = currentPose.translation().z();
         pcl::PointXYZ pointPclTip;
-        pointPclTip.x = currentPose.translation().x() + R.column(2).x();
-        pointPclTip.y = currentPose.translation().y() + R.column(2).y();
-        pointPclTip.z = currentPose.translation().z() + R.column(2).z();
+        pointPclTip.x = currentPose.translation().x() + currentPose.rotation().matrix().col(2).x();
+        pointPclTip.y = currentPose.translation().y() + currentPose.rotation().matrix().col(2).y();
+        pointPclTip.z = currentPose.translation().z() + currentPose.rotation().matrix().col(2).z();
         //        viewer.addSphere(pointPcl, 0.1, 1.0, 0, 0, name);
         viewer.addLine(pointPcl, pointPclTip, 1, 0, 0, "arrow" + std::to_string(i));
         viewer.addText3D(std::to_string(i), pointPcl, 0.15, 0, 0, 1, std::to_string(i));
     }
 
-    viewer.spin();
+    //    viewer.spin();
 
-    for (size_t i = 0; i < uniqueFeatures.size(); ++i) {
+    for (uint64_t i = 0; i < uniqueFeatures.size(); ++i) {
         initial.insert(gtsam::Symbol('l', i), Point3{});
     }
 

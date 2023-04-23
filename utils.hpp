@@ -7,7 +7,7 @@ namespace detail {
     template<typename T>
     class EnumerateIterator {
     private:
-        size_t index;
+        size_t index{};
         T it;
 
     public:
