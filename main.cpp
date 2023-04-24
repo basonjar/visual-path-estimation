@@ -7,7 +7,7 @@ constexpr size_t WIDTH = 1920;
 constexpr size_t HEIGHT = 1080;
 auto K = std::make_shared<gtsam::Cal3_S2>(WIDTH * 7 / 10, WIDTH * 7 / 10, 0, WIDTH / 2, HEIGHT / 2);
 constexpr float RATIO_THRESHOLD = 0.55f;
-constexpr size_t IMAGE_COUNT = 5;
+constexpr size_t IMAGE_COUNT = 30;
 constexpr size_t IMAGE_STEP = 1;
 
 namespace fs = std::filesystem;
@@ -158,13 +158,13 @@ int main() {
                 }
             }
 
-//                        cv::Mat m;
-//                        cv::drawMatches(images[img1].mat, images[img1].keypoints,
-//                                        images[img2].mat, images[img2].keypoints,
-//                                        goodMatches, m);
-//                        cv::resize(m, m, {}, 0.75, 0.75);
-//                        cv::imshow("Matches", m);
-//                        cv::waitKey(0);
+            //                        cv::Mat m;
+            //                        cv::drawMatches(images[img1].mat, images[img1].keypoints,
+            //                                        images[img2].mat, images[img2].keypoints,
+            //                                        goodMatches, m);
+            //                        cv::resize(m, m, {}, 0.75, 0.75);
+            //                        cv::imshow("Matches", m);
+            //                        cv::waitKey(0);
         }
     }
 
@@ -196,37 +196,39 @@ int main() {
     gtsam::NonlinearFactorGraph graph;
 
     // Add a prior on pose x1. This indirectly specifies where the origin is.
-    graph.addPrior(gtsam::Symbol('x', 0), Pose3::Identity(), gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(0.1), Vector3::Constant(0.3)).finished()));
+    //    auto initialNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(0.1), Vector3::Constant(0.3)).finished());// rpy (rad) then xyz (m)
+    //    graph.addPrior(gtsam::Symbol('x', 0), Pose3::Identity(), initialNoise);
 
-    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(M_PI_4), Vector3::Constant(10)).finished());// rpy (rad) then xyz (m)
-    for (uint64_t i = 1; i < images.size(); ++i) {
-        graph.emplace_shared<gtsam::BetweenFactor<Pose3>>(
-                gtsam::Symbol('x', i - 1), gtsam::Symbol('x', i),
-                Pose3::Identity(),
-                poseNoise);
-    }
+    //    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(M_PI_4), Vector3::Constant(10)).finished());// rpy (rad) then xyz (m)
+    //    for (uint64_t i = 1; i < images.size(); ++i) {
+    //        graph.emplace_shared<gtsam::BetweenFactor<Pose3>>(
+    //                gtsam::Symbol('x', i - 1), gtsam::Symbol('x', i),
+    //                Pose3::Identity(),
+    //                poseNoise);
+    //    }
 
     std::unordered_set<uint64_t> imageConstraints;
 
-    auto featureNoise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0); // 2 pixels in u/v
+    auto featureNoise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0);// 2 pixels in u/v
     for (auto const& [featureId, imagesWithUniqueFeature]: uniqueFeatures | enumerate()) {
         printf("This many features: %zu\n", imagesWithUniqueFeature.size());
-//        if (imagesWithUniqueFeature.size() < 3) continue;
-        SmartFactor::shared_ptr factor(new SmartFactor(featureNoise, K));
+        //        if (imagesWithUniqueFeature.size() < 3) continue;
+        auto factor = std::make_shared<SmartFactor>(featureNoise, K);
         for (auto const& image: imagesWithUniqueFeature) {
-            factor->add(Point2(image.keypoint.pt.x, image.keypoint.pt.y), image.component.imageIndex);
+            factor->add(Point2(image.keypoint.pt.x, image.keypoint.pt.y), gtsam::Symbol('x', image.component.imageIndex));
 
-//                        cv::Mat m;
-//                        cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, m);
-//                        cv::resize(m, m, {}, 0.8, 0.8);
-//                        cv::imshow("Keypoint", m);
-//                        cv::waitKey();
+            //                        cv::Mat m;
+            //                        cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, m);
+            //                        cv::resize(m, m, {}, 0.8, 0.8);
+            //                        cv::imshow("Keypoint", m);
+            //                        cv::waitKey();
 
             //            std::printf("Feature %zu in image %zu\n", featureId, image.component.imageIndex);
 
 
             imageConstraints.insert(image.component.imageIndex);
         }
+        graph.push_back(factor);
     }
     if (imageConstraints.size() != images.size()) throw std::runtime_error("Each image needs a constraint!");
 
@@ -275,15 +277,19 @@ int main() {
 
         initial.insert(gtsam::Symbol('x', i), globalPose);
 
+        if (i == 1 || i == 2) {
+            auto initialNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(0.1), Vector3::Constant(0.3)).finished());// rpy (rad) then xyz (m)
+            graph.addPrior(gtsam::Symbol('x', i - 1), globalPose, initialNoise);
+        }
+
         Point3 origin = globalPose* Point3{0, 0, 0};
         Point3 tip = globalPose* Point3{0, 0, 1};
 
         pcl::PointXYZ pointPcl(origin.x(), origin.y(), origin.z());
         pcl::PointXYZ pointPclTip(tip.x(), tip.y(), tip.z());
 
-        //        viewer.addSphere(pointPcl, 0.1, 1.0, 0, 0, name);
-        viewer.addLine(pointPcl, pointPclTip, 1, 0, 0, "arrow" + std::to_string(i));
-        viewer.addText3D(std::to_string(i), pointPcl, 0.15, 0, 0, 1, std::to_string(i));
+        viewer.addLine(pointPcl, pointPclTip, 0, 0, 1, "initial" + std::to_string(i));
+        //        viewer.addText3D(std::to_string(i), pointPcl, 0.15, 0, 0, 1, std::to_string(i));
     }
 
     for (uint64_t i = 0; i < uniqueFeatures.size(); ++i) {
@@ -295,6 +301,34 @@ int main() {
     gtsam::DoglegParams params;
     gtsam::Values result = gtsam::DoglegOptimizer(graph, initial, params).optimize();
     result.print("result: ");
+
+    for (uint64_t i = 0; i < uniqueFeatures.size(); ++i) {
+        auto smart = std::dynamic_pointer_cast<SmartFactor>(graph[i]);
+        if (!smart) continue;
+
+        gtsam::TriangulationResult t = smart->point();
+        if (!t) continue;
+
+        pcl::PointXYZ pointPcl(t->x(), t->y(), t->z());
+
+        viewer.addSphere(pointPcl, 0.1, 1, 0, 0, "feature" + std::to_string(i));
+    }
+
+    for (uint64_t i = 0; i < images.size(); ++i) {
+        auto pose = result.at<Pose3>(gtsam::Symbol('x', i));
+        Point3 origin = pose* Point3{0, 0, 0};
+        Point3 tip = pose* Point3{0, 0, 1};
+
+        pcl::PointXYZ pointPcl(origin.x(), origin.y(), origin.z());
+        pcl::PointXYZ pointPclTip(tip.x(), tip.y(), tip.z());
+
+        viewer.addLine(pointPcl, pointPclTip, 1, 0, 0, "result" + std::to_string(i));
+        //        viewer.addText3D(std::to_string(i), pointPcl, 0.15, 0, 0, 1, std::to_string(i));
+    }
+
+    std::printf("Error: %f %f\n", graph.error(result), graph.error(initial));
+
+    viewer.spin();
 
     return EXIT_SUCCESS;
 }
