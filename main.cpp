@@ -1,12 +1,14 @@
 #include "pch.h"
+#include <gtsam/slam/SmartProjectionPoseFactor.h>
 
 #include "utils.hpp"
 
 constexpr size_t WIDTH = 1920;
 constexpr size_t HEIGHT = 1080;
 auto K = std::make_shared<gtsam::Cal3_S2>(WIDTH * 7 / 10, WIDTH * 7 / 10, 0, WIDTH / 2, HEIGHT / 2);
-constexpr float RATIO_THRESHOLD = 0.6f;
-constexpr size_t IMAGE_COUNT = 10;
+constexpr float RATIO_THRESHOLD = 0.55f;
+constexpr size_t IMAGE_COUNT = 5;
+constexpr size_t IMAGE_STEP = 1;
 
 namespace fs = std::filesystem;
 
@@ -18,6 +20,7 @@ using gtsam::Pose3;
 using gtsam::Rot3;
 using gtsam::Vector;
 using gtsam::Vector3;
+using SmartFactor = gtsam::SmartProjectionPoseFactor<gtsam::Cal3_S2>;
 
 struct Image {
     cv::Mat mat;
@@ -85,7 +88,12 @@ auto loadImages(fs::path const& imageDirectoryPath) {
     });
     imagePaths.resize(IMAGE_COUNT);
 
-    auto images = imagePaths | std::views::transform([](fs::directory_entry const& imagePath) {
+    std::vector<fs::directory_entry> newImagePaths;
+    for (int i = 0; i < imagePaths.size(); i += IMAGE_STEP) {
+        newImagePaths.push_back(imagePaths[i]);
+    }
+
+    auto images = newImagePaths | std::views::transform([](fs::directory_entry const& imagePath) {
                       std::cout << "\tLoading " << imagePath.path() << std::endl;
 
                       cv::Mat mat = cv::imread(imagePath.path(), cv::IMREAD_COLOR);
@@ -150,13 +158,13 @@ int main() {
                 }
             }
 
-            //            cv::Mat m;
-            //            cv::drawMatches(images[img1].mat, images[img1].keypoints,
-            //                            images[img2].mat, images[img2].keypoints,
-            //                            goodMatches, m);
-            //            cv::resize(m, m, {}, 0.45, 0.45);
-            //            cv::imshow("Matches", m);
-            //            cv::waitKey(0);
+//                        cv::Mat m;
+//                        cv::drawMatches(images[img1].mat, images[img1].keypoints,
+//                                        images[img2].mat, images[img2].keypoints,
+//                                        goodMatches, m);
+//                        cv::resize(m, m, {}, 0.75, 0.75);
+//                        cv::imshow("Matches", m);
+//                        cv::waitKey(0);
         }
     }
 
@@ -188,11 +196,10 @@ int main() {
     gtsam::NonlinearFactorGraph graph;
 
     // Add a prior on pose x1. This indirectly specifies where the origin is.
-    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(0.1), Vector3::Constant(0.3)).finished());// rpy (rad) then xyz (m)
-    graph.addPrior(gtsam::Symbol('x', 0), Pose3::Identity(), poseNoise);
+    graph.addPrior(gtsam::Symbol('x', 0), Pose3::Identity(), gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(0.1), Vector3::Constant(0.3)).finished()));
 
+    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(M_PI_4), Vector3::Constant(10)).finished());// rpy (rad) then xyz (m)
     for (uint64_t i = 1; i < images.size(); ++i) {
-        auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(M_PI_2), Vector3::Constant(10)).finished());// rpy (rad) then xyz (m)
         graph.emplace_shared<gtsam::BetweenFactor<Pose3>>(
                 gtsam::Symbol('x', i - 1), gtsam::Symbol('x', i),
                 Pose3::Identity(),
@@ -201,26 +208,22 @@ int main() {
 
     std::unordered_set<uint64_t> imageConstraints;
 
-    auto featureNoise = gtsam::noiseModel::Isotropic::Sigma(2, 5.0);
+    auto featureNoise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0); // 2 pixels in u/v
     for (auto const& [featureId, imagesWithUniqueFeature]: uniqueFeatures | enumerate()) {
-        if (imagesWithUniqueFeature.size() < 8) continue;
-
+        printf("This many features: %zu\n", imagesWithUniqueFeature.size());
+//        if (imagesWithUniqueFeature.size() < 3) continue;
+        SmartFactor::shared_ptr factor(new SmartFactor(featureNoise, K));
         for (auto const& image: imagesWithUniqueFeature) {
+            factor->add(Point2(image.keypoint.pt.x, image.keypoint.pt.y), image.component.imageIndex);
 
-            //            cv::Mat m;
-            //            cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, m);
-            //            cv::resize(m, m, {}, 0.8, 0.8);
-            //            cv::imshow("Keypoint", m);
-            //            cv::waitKey();
+//                        cv::Mat m;
+//                        cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, m);
+//                        cv::resize(m, m, {}, 0.8, 0.8);
+//                        cv::imshow("Keypoint", m);
+//                        cv::waitKey();
 
             //            std::printf("Feature %zu in image %zu\n", featureId, image.component.imageIndex);
 
-            graph.emplace_shared<gtsam::GenericProjectionFactor<gtsam::Pose3, gtsam::Point3, gtsam::Cal3_S2>>(
-                    Point2(image.keypoint.pt.x, image.keypoint.pt.y),
-                    featureNoise,
-                    gtsam::Symbol('x', image.component.imageIndex),
-                    gtsam::Symbol('l', featureId),
-                    K);
 
             imageConstraints.insert(image.component.imageIndex);
         }
