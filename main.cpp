@@ -1,14 +1,25 @@
 #include "pch.h"
 #include <gtsam/slam/SmartProjectionPoseFactor.h>
+#include <fstream>
 
 #include "utils.hpp"
 
 constexpr size_t WIDTH = 1920;
 constexpr size_t HEIGHT = 1080;
-auto K = std::make_shared<gtsam::Cal3_S2>(WIDTH * 7 / 10, WIDTH * 7 / 10, 0, WIDTH / 2, HEIGHT / 2);
-constexpr float RATIO_THRESHOLD = 0.55f;
-constexpr size_t IMAGE_COUNT = 30;
-constexpr size_t IMAGE_STEP = 1;
+// Cube
+//auto K = std::make_shared<gtsam::Cal3_S2>(39.6, WIDTH, HEIGHT);
+// Caterpillar
+//auto K = std::make_shared<gtsam::Cal3_S2>(WIDTH * 7 / 10, WIDTH * 7 / 10, 0, WIDTH / 2, HEIGHT / 2);
+// Dino Ring
+auto K = std::make_shared<gtsam::Cal3_S2>(3310.4, 3325.5, 0, 316.73, 200.55);
+// Temple Ring
+//auto K = std::make_shared<gtsam::Cal3_S2>(1520.4, 1525.9, 0, 302.32, 246.87);
+// CSGO
+//auto K = std::make_shared<gtsam::Cal3_S2>(40, WIDTH, HEIGHT);
+
+constexpr float RATIO_THRESHOLD = 0.6f;
+constexpr size_t IMAGE_COUNT = 15;
+const std::string DATASET = "dinoRing";
 
 namespace fs = std::filesystem;
 
@@ -88,19 +99,14 @@ auto loadImages(fs::path const& imageDirectoryPath) {
     });
     imagePaths.resize(IMAGE_COUNT);
 
-    std::vector<fs::directory_entry> newImagePaths;
-    for (int i = 0; i < imagePaths.size(); i += IMAGE_STEP) {
-        newImagePaths.push_back(imagePaths[i]);
-    }
-
-    auto images = newImagePaths | std::views::transform([](fs::directory_entry const& imagePath) {
+    auto images = imagePaths | std::views::transform([](fs::directory_entry const& imagePath) {
                       std::cout << "\tLoading " << imagePath.path() << std::endl;
 
                       cv::Mat mat = cv::imread(imagePath.path(), cv::IMREAD_COLOR);
                       cv::Mat descriptors;
                       std::vector<cv::KeyPoint> features;
 
-                      cv::Ptr<cv::ORB> descriptorExtractor = cv::ORB::create();
+                      cv::Ptr<cv::SIFT> descriptorExtractor = cv::SIFT::create();
                       descriptorExtractor->detectAndCompute(mat, cv::noArray(), features, descriptors);
 
                       return Image{mat, features, descriptors};
@@ -110,7 +116,7 @@ auto loadImages(fs::path const& imageDirectoryPath) {
 }
 
 int main() {
-    auto imageDirectoryPath = fs::current_path() / "data" / "caterpillar";
+    auto imageDirectoryPath = fs::current_path() / "data" / DATASET / "images";
 
     // Load images and calculate features
     std::vector<Image> images = loadImages(imageDirectoryPath);
@@ -120,27 +126,10 @@ int main() {
 
     for (size_t img1 = 0; img1 < images.size(); ++img1) {
         for (size_t img2 = img1 + 1; img2 < images.size(); ++img2) {
-            //            if (img1 == img2) continue;
-
-            //            auto matcher = cv::BFMatcher::create(cv::NORM_HAMMING, true);
-            //            using BestMatches = std::vector<cv::DMatch>;
-            //            std::vector<BestMatches> matches;
-            //            matcher->knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 1);
-            //
-            //            BestMatches goodMatches;
-            //
-            //            for (BestMatches const& bestMatch: matches | std::views::filter([](BestMatches const& bestMatch) { return !bestMatch.empty(); })) {
-            //                assert(bestMatch.size() == 1);
-            //
-            //                goodMatches.push_back(bestMatch[0]);
-            //                auto const& firstBest = bestMatch[0];
-            //                unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
-            //            }
-
             using BestMatches = std::vector<cv::DMatch>;
             std::vector<BestMatches> matches;
 
-            cv::BFMatcher matcher{cv::NORM_HAMMING};
+            cv::BFMatcher matcher{cv::NORM_L2};
             matcher.knnMatch(images[img1].descriptors, images[img2].descriptors, matches, 2);
 
             BestMatches goodMatches;
@@ -152,19 +141,10 @@ int main() {
                 double ratio = firstBest.distance / secondBest.distance;
 
                 if (ratio < RATIO_THRESHOLD) {
-                    //                    std::printf("Match: %d -> %d\n", firstBest.queryIdx, firstBest.trainIdx);
                     unionComponents(featureGraph, FeatureComponent(img1, firstBest.queryIdx), FeatureComponent(img2, firstBest.trainIdx));
                     goodMatches.push_back(firstBest);
                 }
             }
-
-            //                        cv::Mat m;
-            //                        cv::drawMatches(images[img1].mat, images[img1].keypoints,
-            //                                        images[img2].mat, images[img2].keypoints,
-            //                                        goodMatches, m);
-            //                        cv::resize(m, m, {}, 0.75, 0.75);
-            //                        cv::imshow("Matches", m);
-            //                        cv::waitKey(0);
         }
     }
 
@@ -178,54 +158,16 @@ int main() {
 
     std::printf("Unique features: %zu\n", uniqueFeatures.size());
 
-    //    for (auto const& [_, uniqueFeature]: uniqueComponents) {
-    //        if (uniqueFeature.size() != 2) continue;
-    //
-    //        std::printf("Images: %zu\n", uniqueFeature.size());
-    //
-    //        for (auto& image: uniqueFeature) {
-    //            cv::Mat out = images[image.component.imageIndex].mat.clone();
-    //            //            cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, out);
-    //            cv::circle(out, image.keypoint.pt, 5, {0, 0, 255}, 2);
-    //            cv::resize(out, out, {}, 0.8, 0.8);
-    //            cv::imshow("Keypoint", out);
-    //            cv::waitKey();
-    //        }
-    //    }
-
     gtsam::NonlinearFactorGraph graph;
 
-    // Add a prior on pose x1. This indirectly specifies where the origin is.
-    //    auto initialNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(0.1), Vector3::Constant(0.3)).finished());// rpy (rad) then xyz (m)
-    //    graph.addPrior(gtsam::Symbol('x', 0), Pose3::Identity(), initialNoise);
-
-    //    auto poseNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(M_PI_4), Vector3::Constant(10)).finished());// rpy (rad) then xyz (m)
-    //    for (uint64_t i = 1; i < images.size(); ++i) {
-    //        graph.emplace_shared<gtsam::BetweenFactor<Pose3>>(
-    //                gtsam::Symbol('x', i - 1), gtsam::Symbol('x', i),
-    //                Pose3::Identity(),
-    //                poseNoise);
-    //    }
-
     std::unordered_set<uint64_t> imageConstraints;
-
-    auto featureNoise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0);// 2 pixels in u/v
+    size_t smartFactorConstraintCount = 0;
+    auto featureNoise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0); // sigma = pixels in u/v
     for (auto const& [featureId, imagesWithUniqueFeature]: uniqueFeatures | enumerate()) {
-        printf("This many features: %zu\n", imagesWithUniqueFeature.size());
-        //        if (imagesWithUniqueFeature.size() < 3) continue;
         auto factor = std::make_shared<SmartFactor>(featureNoise, K);
         for (auto const& image: imagesWithUniqueFeature) {
             factor->add(Point2(image.keypoint.pt.x, image.keypoint.pt.y), gtsam::Symbol('x', image.component.imageIndex));
-
-            //                        cv::Mat m;
-            //                        cv::drawKeypoints(images[image.component.imageIndex].mat, {image.keypoint}, m);
-            //                        cv::resize(m, m, {}, 0.8, 0.8);
-            //                        cv::imshow("Keypoint", m);
-            //                        cv::waitKey();
-
-            //            std::printf("Feature %zu in image %zu\n", featureId, image.component.imageIndex);
-
-
+            ++smartFactorConstraintCount;
             imageConstraints.insert(image.component.imageIndex);
         }
         graph.push_back(factor);
@@ -235,14 +177,16 @@ int main() {
     graph.saveGraph("graph.dot");
 
     pcl::visualization::PCLVisualizer viewer("3D Viewer");
-    viewer.setBackgroundColor(0, 0, 0);
-    viewer.addCoordinateSystem(1.0);
+    viewer.setBackgroundColor(0.16, 0.17, 0.18);
     viewer.initCameraParameters();
 
     gtsam::Values initial;
+    std::ofstream estimates("results/" + DATASET + "/estimates.txt");
 
     Pose3 globalPose = Pose3::Identity();
+    Pose3 newPose = Pose3::Identity();
     initial.insert(gtsam::Symbol('x', 0), globalPose);
+    estimates << "1 0 0 0 1 0 0 0 1 0 0 0" << std::endl;
 
     for (uint64_t i = 1; i < images.size(); ++i) {
         Image const& image1 = images[i - 1];
@@ -266,40 +210,47 @@ int main() {
         cv::cv2eigen(Rcv, R);
         Point3 t;
         cv::cv2eigen(tcv, t);
-
-        //        std::cout << "IMAGE DELTA:" << std::endl;
-        //        std::cout << "Translation: " << t << std::endl;
-        //        std::cout << "Rotation: " << R.eulerAngles(0, 1, 2) << std::endl;
-
-        Pose3 poseBetween{Rot3{R}, t * 0.3};
-
-        globalPose = globalPose * poseBetween;
-
-        initial.insert(gtsam::Symbol('x', i), globalPose);
+        estimates << R(0, 0) << " " << R(0, 1) <<  " " << R(0, 2) << " " << R(1, 0) << " " << R(1, 1) << " " << R(1, 2) << " " << R(2, 0) << " " << R(2, 1) << " " << R(2, 2) << " " << t(0) << " " << t(1) << " " << t(2) << std::endl;
 
         if (i == 1 || i == 2) {
             auto initialNoise = gtsam::noiseModel::Diagonal::Sigmas((Vector(6) << Vector3::Constant(0.1), Vector3::Constant(0.3)).finished());// rpy (rad) then xyz (m)
             graph.addPrior(gtsam::Symbol('x', i - 1), globalPose, initialNoise);
         }
+        Pose3 poseBetween{Rot3{R}, t * 0.3};
+
+        newPose = globalPose * poseBetween;
+        pcl::PointXYZ oldPoint (globalPose.translation().x(), globalPose.translation().y(), globalPose.translation().z());
+        pcl::PointXYZ newPoint(newPose.translation().x(), newPose.translation().y(), newPose.translation().z());
+        viewer.addLine(oldPoint, newPoint, 0.66, 0.62, 0.93, "line" + std::to_string(i));
+        globalPose = newPose;
+
+        initial.insert(gtsam::Symbol('x', i), globalPose);
+
 
         Point3 origin = globalPose* Point3{0, 0, 0};
-        Point3 tip = globalPose* Point3{0, 0, 1};
+        Point3 tip = globalPose* Point3{0, 0, 0.15};
 
         pcl::PointXYZ pointPcl(origin.x(), origin.y(), origin.z());
         pcl::PointXYZ pointPclTip(tip.x(), tip.y(), tip.z());
 
-        viewer.addLine(pointPcl, pointPclTip, 0, 0, 1, "initial" + std::to_string(i));
-        //        viewer.addText3D(std::to_string(i), pointPcl, 0.15, 0, 0, 1, std::to_string(i));
+        viewer.addLine(pointPcl, pointPclTip, 0.91, 0.42, 0.53, "initial" + std::to_string(i));
+        viewer.addSphere(pointPclTip, 0.006, 0.91, 0.42, 0.53, "initialTip" + std::to_string(i));
     }
 
     for (uint64_t i = 0; i < uniqueFeatures.size(); ++i) {
         initial.insert(gtsam::Symbol('l', i), Point3{});
     }
 
-    //    viewer.spin();
-
     gtsam::DoglegParams params;
-    gtsam::Values result = gtsam::DoglegOptimizer(graph, initial, params).optimize();
+    gtsam::Values result;
+    try {
+        result = gtsam::DoglegOptimizer(graph, initial, params).optimize();
+    } catch (gtsam::IndeterminantLinearSystemException& e) {
+        std::cout << "IndeterminantLinearSystemException: " << e.what() << std::endl;
+        std::printf("Variables: %u\n", uniqueFeatures.size() + images.size());
+        std::printf("SmartFactor Constraints: %zu\n", smartFactorConstraintCount);
+        return 1;
+    }
     result.print("result: ");
 
     for (uint64_t i = 0; i < uniqueFeatures.size(); ++i) {
@@ -307,24 +258,46 @@ int main() {
         if (!smart) continue;
 
         gtsam::TriangulationResult t = smart->point();
-        if (!t) continue;
+        double norm = t->x() * t->x() + t->y() * t->y() + t->z() * t->z();
+        if (!t || !t.valid() || norm > 10000) continue;
 
-        pcl::PointXYZ pointPcl(t->x(), t->y(), t->z());
-
-        viewer.addSphere(pointPcl, 0.1, 1, 0, 0, "feature" + std::to_string(i));
+        double sideLength = 0.007;
+        viewer.addCube(t->x() - sideLength / 2, t->x() + sideLength / 2,
+                                t->y() - sideLength / 2, t->y() + sideLength / 2,
+                                t->z() - sideLength / 2, t->z() + sideLength / 2,
+                                1, 1, 1, "feature" + std::to_string(i));
     }
+
+    for(uint64_t i = 0; i < images.size() - 1; ++i) {
+        auto pose1 = result.at<Pose3>(gtsam::Symbol('x', i));
+        Point3 origin = pose1* Point3{0, 0, 0};
+        auto pose2 = result.at<Pose3>(gtsam::Symbol('x', i + 1));
+        Point3 to = pose2* Point3{0, 0, 0};
+
+        pcl::PointXYZ pointOrigin(origin.x(), origin.y(), origin.z());
+        pcl::PointXYZ pointTo(to.x(), to.y(), to.z());
+
+        viewer.addLine(pointOrigin, pointTo, 0.56, 0.85, 0.89, "resultLine" + std::to_string(i));
+    }
+
+    std::ofstream resultsFile("results/" + DATASET + "/results.txt");
 
     for (uint64_t i = 0; i < images.size(); ++i) {
         auto pose = result.at<Pose3>(gtsam::Symbol('x', i));
+        Matrix3 rot = pose.rotation().matrix();
         Point3 origin = pose* Point3{0, 0, 0};
-        Point3 tip = pose* Point3{0, 0, 1};
+        resultsFile << rot(0, 0) << " " << rot(0, 1) << " " << rot(0, 2) << " " << rot(1, 0) << " " << rot(1, 1) << " " << rot(1, 2) << " " << rot(2, 0) << " " << rot(2, 1) << " " << rot(2, 2) << " " << origin.x() << " " << origin.y() << " " << origin.z() << std::endl;
+        Point3 tip = pose* Point3{0, 0, 0.15};
 
         pcl::PointXYZ pointPcl(origin.x(), origin.y(), origin.z());
         pcl::PointXYZ pointPclTip(tip.x(), tip.y(), tip.z());
 
-        viewer.addLine(pointPcl, pointPclTip, 1, 0, 0, "result" + std::to_string(i));
-        //        viewer.addText3D(std::to_string(i), pointPcl, 0.15, 0, 0, 1, std::to_string(i));
+        viewer.addLine(pointPcl, pointPclTip, 0.5, 0.83, 0.49, "result" + std::to_string(i));
+        viewer.addSphere(pointPclTip, 0.006, 0.5, 0.83, 0.49, "resultTip" + std::to_string(i));
     }
+
+    std::printf("Variables: %u\n", uniqueFeatures.size() + images.size());
+    std::printf("SmartFactor Constraints: %u\n", smartFactorConstraintCount);
 
     std::printf("Error: %f %f\n", graph.error(result), graph.error(initial));
 
